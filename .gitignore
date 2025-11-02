@@ -1,0 +1,19 @@
+# Ignore Large Data Files
+/data/length_matrix.npy
+/data/X_test.npy
+/data/adj_matrix.npy
+/data/adj_matrix_checkpoint.npy
+/data/df_edges_checkpoint.parquet
+
+# Ignore Raw Data
+/probe_counts/
+/geojson/
+
+# Ignore Python Environment & Cache
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Ignore OS-specific files
+.DS_Store

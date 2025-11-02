@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Emergency Vehicle Routing</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <style>
+        body { font-family: Arial, sans-serif; display: flex; margin: 0; }
+        #map { height: 100vh; width: 80vw; cursor: crosshair; }
+        #sidebar {
+            width: 20vw;
+            min-width: 300px;
+            padding: 15px;
+            box-sizing: border-box;
+            background: #f4f4f4;
+            height: 100vh;
+            overflow-y: auto;
+        }
+        h2 { margin-top: 0; }
+        #status { font-weight: bold; }
+        button {
+            width: 100%; padding: 10px; font-size: 16px;
+            margin-bottom: 10px; cursor: pointer;
+        }
+        #find-path-btn { background: #007bff; color: white; border: none; }
+        #find-path-btn:disabled { background: #ccc; }
+        #reset-btn { background: #dc3545; color: white; border: none; }
+        .result-box {
+            border: 2px solid #ddd;
+            padding: 10px;
+            margin-top: 15px;
+            border-radius: 5px;
+        }
+        .result-box h4 { margin-top: 0; }
+        /* --- NEW STYLES --- */
+        .eta-smart { color: #d90000; font-weight: bold; font-size: 1.2em; }
+        .eta-naive { color: #003d99; font-weight: bold; }
+        .eta-saved {
+            color: #008a00;
+            font-size: 1.3em;
+            font-weight: bold;
+            text-align: center;
+            background: #e6ffe6;
+            padding: 10px;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="map"></div>
+    <div id="sidebar">
+        <h2>Emergency Router</h2>
+        <p>1. Click the map to set **Accident (Start)**.</p>
+        <p>2. Click again to set **Hospital (End)**.</p>
+        
+        <p><b>Start:</b> <span id="start-node">None</span></p>
+        <p><b>End:</b> <span id="end-node">None</span></p>
+        
+        <button id="find-path-btn" disabled>Find Fastest Path</button>
+        <button id="reset-btn">Reset</button>
+        
+        <hr>
+        <h3>Status</h3>
+        <p id="status">Map loaded. Click to select start point.</p>
+        
+        <div id="result-container" style="display: none;">
+            <div class="result-box" style="border-color: #d90000;">
+                <h4><span style="color: #d90000;">&#9632;</span> Our Smart Path (Model)</h4>
+                <p class="eta-smart" id="result-smart-eta">ETA: 0.0 min</p>
+            </div>
+            
+            <div class="result-box" style="border-color: #003d99;">
+                <h4><span style="color: #003d99;">&#9632;</span> Naive (Shortest) Path</h4>
+                <p class="eta-naive" id="result-naive-eta">ETA: 0.0 min</p>
+            </div>
+            
+            <p class="eta-saved" id="result-saved">You saved 0.0 minutes!</p>
+        </div>
+    </div>
+
+<script>
+    // --- 1. Initialize Map (Centered on Delhi) ---
+    const map = L.map('map').setView([28.6139, 77.2090], 12);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    }).addTo(map);
+
+    // --- 2. Global Variables ---
+    let startMarker = null, endMarker = null;
+    let startNodeId = null, endNodeId = null;
+    let smartPathPolyline = null;
+    let naivePathPolyline = null; // --- NEW ---
+
+    // --- 3. UI Elements ---
+    const statusText = document.getElementById('status');
+    const startNodeText = document.getElementById('start-node');
+    const endNodeText = document.getElementById('end-node');
+    const findPathBtn = document.getElementById('find-path-btn');
+    const resetBtn = document.getElementById('reset-btn');
+    
+    // --- NEW UI ELEMENTS ---
+    const resultContainer = document.getElementById('result-container');
+    const resultSmartEta = document.getElementById('result-smart-eta');
+    const resultNaiveEta = document.getElementById('result-naive-eta');
+    const resultSaved = document.getElementById('result-saved');
+
+
+    // --- 4. Helper: Find Nearest Node (via API) ---
+    async function findNearestNodeOnServer(lat, lon) {
+        statusText.textContent = "Finding nearest intersection...";
+        try {
+            const response = await fetch('/api/get_nearest_node', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ lat: lat, lon: lon })
+            });
+            if (!response.ok) throw new Error('Server error finding node');
+            
+            const node = await response.json();
+            statusText.textContent = "Node found.";
+            return node;
+        } catch (error) {
+            console.error(error);
+            statusText.textContent = `Error: ${error.message}`;
+            return null;
+        }
+    }
+
+    // --- 5. Map Click Handler (Unchanged) ---
+    map.on('click', async (e) => {
+        const { lat, lng } = e.latlng;
+        if (startMarker && endMarker) return;
+        
+        const nearestNode = await findNearestNodeOnServer(lat, lng);
+        if (!nearestNode) return;
+
+        const nodeLatLng = [nearestNode.lat, nearestNode.lon];
+        
+        if (!startMarker) {
+            startMarker = L.marker(nodeLatLng, { title: 'Accident (Start)' }).addTo(map);
+            startNodeId = nearestNode.id;
+            startNodeText.textContent = `ID ${nearestNode.id}`;
+            statusText.textContent = "Click map to set Hospital (End).";
+        } else {
+            endMarker = L.marker(nodeLatLng, { title: 'Hospital (End)' }).addTo(map);
+            endNodeId = nearestNode.id;
+            endNodeText.textContent = `ID ${nearestNode.id}`;
+            statusText.textContent = "Ready to find path.";
+            findPathBtn.disabled = false;
+        }
+    });
+
+    // --- 6. Button: Find Path (UPDATED) ---
+    findPathBtn.addEventListener('click', async () => {
+        if (!startNodeId || !endNodeId) return;
+        
+        statusText.textContent = "Calculating path... (This may take a moment)";
+        findPathBtn.disabled = true;
+        resetAllPaths(); // Clear old paths before starting
+        
+        try {
+            const response = await fetch('/api/find_path', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    start_node_id: startNodeId,
+                    end_node_id: endNodeId
+                })
+            });
+            
+            if (!response.ok) {
+                const err = await response.json();
+                throw new Error(err.error || 'Server error');
+            }
+            
+            const data = await response.json();
+            
+            // --- DRAW BOTH PATHS ---
+            // Draw Naive Path (Blue)
+            naivePathPolyline = L.polyline(data.naive_path_coords, { 
+                color: '#003d99',
+                weight: 5,
+                opacity: 0.7
+            }).addTo(map);
+            
+            // Draw Smart Path (Red)
+            smartPathPolyline = L.polyline(data.smart_path_coords, { 
+                color: '#d90000',
+                weight: 5,
+                opacity: 0.9
+            }).addTo(map);
+
+            // Fit map to show both paths
+            map.fitBounds(smartPathPolyline.getBounds().extend(naivePathPolyline.getBounds()));
+            
+            // --- UPDATE UI TEXT ---
+            statusText.textContent = "Path found!";
+            resultSmartEta.textContent = `ETA: ${data.smart_eta_minutes.toFixed(1)} min`;
+            resultNaiveEta.textContent = `ETA: ${data.naive_eta_minutes.toFixed(1)} min`;
+            
+            if (data.time_saved_minutes > 0.05) {
+                resultSaved.textContent = `You saved ${data.time_saved_minutes.toFixed(1)} minutes!`;
+                resultSaved.style.background = '#e6ffe6';
+                resultSaved.style.color = '#008a00';
+            } else if (data.time_saved_minutes < -0.05) {
+                resultSaved.textContent = `This path is ${Math.abs(data.time_saved_minutes).toFixed(1)} min slower.`;
+                resultSaved.style.background = '#fff0f0';
+                resultSaved.style.color = '#d90000';
+            } else {
+                 resultSaved.textContent = "Both paths are about the same time.";
+                 resultSaved.style.background = '#f4f4f4';
+                 resultSaved.style.color = '#333';
+            }
+            resultContainer.style.display = 'block';
+            
+        } catch (error) {
+            console.error(error);
+            statusText.textContent = `Error: ${error.message}`;
+            findPathBtn.disabled = false; // Re-enable on error
+        }
+    });
+
+    // --- 7. Button: Reset (UPDATED) ---
+    function resetAllPaths() {
+        if (smartPathPolyline) map.removeLayer(smartPathPolyline);
+        if (naivePathPolyline) map.removeLayer(naivePathPolyline);
+        smartPathPolyline = null;
+        naivePathPolyline = null;
+    }
+
+    resetBtn.addEventListener('click', () => {
+        resetAllPaths();
+        if (startMarker) map.removeLayer(startMarker);
+        if (endMarker) map.removeLayer(endMarker);
+        
+        startMarker = null;
+        endMarker = null;
+        startNodeId = null;
+        endNodeId = null;
+        
+        startNodeText.textContent = "None";
+        endNodeText.textContent = "None";
+        statusText.textContent = "Click map to set Accident (Start).";
+        findPathBtn.disabled = true;
+        resultContainer.style.display = 'none'; // Hide results
+    });
+
+</script>
+
+</body>
+</html>
