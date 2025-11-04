@@ -26,25 +26,29 @@
         #find-path-btn { background: #007bff; color: white; border: none; }
         #find-path-btn:disabled { background: #ccc; }
         #reset-btn { background: #dc3545; color: white; border: none; }
+        
+        /* --- Dropdown Styles --- */
+        label { font-weight: bold; margin-top: 10px; display: block; }
+        select {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 15px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+        }
+        
+        /* --- Result Box Styles --- */
         .result-box {
-            border: 2px solid #ddd;
+            border: 2px solid #007bff;
             padding: 10px;
             margin-top: 15px;
             border-radius: 5px;
+            display: none; /* Starts hidden */
         }
-        .result-box h4 { margin-top: 0; }
-        /* --- NEW STYLES --- */
-        .eta-smart { color: #d90000; font-weight: bold; font-size: 1.2em; }
-        .eta-naive { color: #003d99; font-weight: bold; }
-        .eta-saved {
-            color: #008a00;
-            font-size: 1.3em;
-            font-weight: bold;
-            text-align: center;
-            background: #e6ffe6;
-            padding: 10px;
-            border-radius: 5px;
-        }
+        .result-box h4 { margin: 0 0 5px 0; }
+        .result-box p { margin: 3px 0; }
+        .eta { font-size: 1.3em; font-weight: bold; color: #333; }
+        
     </style>
 </head>
 <body>
@@ -52,31 +56,30 @@
     <div id="map"></div>
     <div id="sidebar">
         <h2>Emergency Router</h2>
-        <p>1. Click the map to set **Accident (Start)**.</p>
-        <p>2. Click again to set **Hospital (End)**.</p>
+        <p>1. Click map for **Accident (Start)**.</p>
+        <p>2. Click again for **Hospital (End)**.</p>
         
         <p><b>Start:</b> <span id="start-node">None</span></p>
         <p><b>End:</b> <span id="end-node">None</span></p>
         
-        <button id="find-path-btn" disabled>Find Fastest Path</button>
+        <label for="method-select">Routing Method:</label>
+        <select id="method-select">
+            <option value="model_a" selected>Model A (GRU - Fastest)</option>
+            <option value="model_b">Model B (GCN-GRU)</option>
+            <option value="naive">Naive (Shortest Distance)</option>
+        </select>
+        
+        <button id="find-path-btn" disabled>Find Path</button>
         <button id="reset-btn">Reset</button>
         
         <hr>
         <h3>Status</h3>
         <p id="status">Map loaded. Click to select start point.</p>
         
-        <div id="result-container" style="display: none;">
-            <div class="result-box" style="border-color: #d90000;">
-                <h4><span style="color: #d90000;">&#9632;</span> Our Smart Path (Model)</h4>
-                <p class="eta-smart" id="result-smart-eta">ETA: 0.0 min</p>
-            </div>
-            
-            <div class="result-box" style="border-color: #003d99;">
-                <h4><span style="color: #003d99;">&#9632;</span> Naive (Shortest) Path</h4>
-                <p class="eta-naive" id="result-naive-eta">ETA: 0.0 min</p>
-            </div>
-            
-            <p class="eta-saved" id="result-saved">You saved 0.0 minutes!</p>
+        <div class="result-box" id="result-container">
+            <h4 id="result-method-name">Result</h4>
+            <p class="eta" id="result-eta">ETA: 0.0 min</p>
+            <p class="dist" id="result-dist">Dist: 0.0 km</p>
         </div>
     </div>
 
@@ -90,8 +93,7 @@
     // --- 2. Global Variables ---
     let startMarker = null, endMarker = null;
     let startNodeId = null, endNodeId = null;
-    let smartPathPolyline = null;
-    let naivePathPolyline = null; // --- NEW ---
+    let pathPolyline = null; // We only need one polyline now
 
     // --- 3. UI Elements ---
     const statusText = document.getElementById('status');
@@ -99,12 +101,12 @@
     const endNodeText = document.getElementById('end-node');
     const findPathBtn = document.getElementById('find-path-btn');
     const resetBtn = document.getElementById('reset-btn');
+    const methodSelect = document.getElementById('method-select'); // The dropdown
     
-    // --- NEW UI ELEMENTS ---
     const resultContainer = document.getElementById('result-container');
-    const resultSmartEta = document.getElementById('result-smart-eta');
-    const resultNaiveEta = document.getElementById('result-naive-eta');
-    const resultSaved = document.getElementById('result-saved');
+    const resultMethodName = document.getElementById('result-method-name');
+    const resultEta = document.getElementById('result-eta');
+    const resultDist = document.getElementById('result-dist');
 
 
     // --- 4. Helper: Find Nearest Node (via API) ---
@@ -152,13 +154,15 @@
         }
     });
 
-    // --- 6. Button: Find Path (UPDATED) ---
+    // --- 6. Button: Find Path (This is your new logic) ---
     findPathBtn.addEventListener('click', async () => {
         if (!startNodeId || !endNodeId) return;
         
-        statusText.textContent = "Calculating path... (This may take a moment)";
-        findPathBtn.disabled = true;
-        resetAllPaths(); // Clear old paths before starting
+        const selectedMethod = methodSelect.value; // Get the dropdown value
+        
+        statusText.textContent = `Calculating path using ${selectedMethod}...`;
+        findPathBtn.disabled = true; // Disable button during calculation
+        resetPath(); // Clear old path
         
         try {
             const response = await fetch('/api/find_path', {
@@ -166,7 +170,8 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     start_node_id: startNodeId,
-                    end_node_id: endNodeId
+                    end_node_id: endNodeId,
+                    method: selectedMethod // Send the method to the backend
                 })
             });
             
@@ -177,61 +182,53 @@
             
             const data = await response.json();
             
-            // --- DRAW BOTH PATHS ---
-            // Draw Naive Path (Blue)
-            naivePathPolyline = L.polyline(data.naive_path_coords, { 
-                color: '#003d99',
-                weight: 5,
-                opacity: 0.7
-            }).addTo(map);
-            
-            // Draw Smart Path (Red)
-            smartPathPolyline = L.polyline(data.smart_path_coords, { 
-                color: '#d90000',
-                weight: 5,
-                opacity: 0.9
+            // --- Determine Color ---
+            let color = '#003d99'; // Default Naive
+            let borderColor = '#003d99';
+            if (data.method_name.includes("Model A")) {
+                color = '#d90000';
+                borderColor = '#d90000';
+            }
+            if (data.method_name.includes("Model B")) {
+                color = '#008a00';
+                borderColor = '#008a00';
+            }
+
+            // --- Draw the Path ---
+            pathPolyline = L.polyline(data.path_coords, { 
+                color: color, weight: 5, opacity: 0.8
             }).addTo(map);
 
-            // Fit map to show both paths
-            map.fitBounds(smartPathPolyline.getBounds().extend(naivePathPolyline.getBounds()));
+            map.fitBounds(pathPolyline.getBounds());
             
             // --- UPDATE UI TEXT ---
-            statusText.textContent = "Path found!";
-            resultSmartEta.textContent = `ETA: ${data.smart_eta_minutes.toFixed(1)} min`;
-            resultNaiveEta.textContent = `ETA: ${data.naive_eta_minutes.toFixed(1)} min`;
+            resultMethodName.textContent = data.method_name;
+            resultEta.textContent = `ETA: ${data.eta_minutes.toFixed(1)} min`;
+            resultDist.textContent = `Dist: ${data.distance_km.toFixed(1)} km`;
             
-            if (data.time_saved_minutes > 0.05) {
-                resultSaved.textContent = `You saved ${data.time_saved_minutes.toFixed(1)} minutes!`;
-                resultSaved.style.background = '#e6ffe6';
-                resultSaved.style.color = '#008a00';
-            } else if (data.time_saved_minutes < -0.05) {
-                resultSaved.textContent = `This path is ${Math.abs(data.time_saved_minutes).toFixed(1)} min slower.`;
-                resultSaved.style.background = '#fff0f0';
-                resultSaved.style.color = '#d90000';
-            } else {
-                 resultSaved.textContent = "Both paths are about the same time.";
-                 resultSaved.style.background = '#f4f4f4';
-                 resultSaved.style.color = '#333';
-            }
-            resultContainer.style.display = 'block';
+            // Style the result box
+            resultContainer.style.borderColor = borderColor;
+            resultContainer.querySelector('.eta').style.color = color;
+            
+            statusText.textContent = "Path found!";
+            resultContainer.style.display = 'block'; // Show the result
             
         } catch (error) {
             console.error(error);
             statusText.textContent = `Error: ${error.message}`;
-            findPathBtn.disabled = false; // Re-enable on error
         }
+        
+        findPathBtn.disabled = false; // Re-enable button
     });
 
     // --- 7. Button: Reset (UPDATED) ---
-    function resetAllPaths() {
-        if (smartPathPolyline) map.removeLayer(smartPathPolyline);
-        if (naivePathPolyline) map.removeLayer(naivePathPolyline);
-        smartPathPolyline = null;
-        naivePathPolyline = null;
+    function resetPath() {
+        if (pathPolyline) map.removeLayer(pathPolyline);
+        pathPolyline = null;
     }
 
     resetBtn.addEventListener('click', () => {
-        resetAllPaths();
+        resetPath();
         if (startMarker) map.removeLayer(startMarker);
         if (endMarker) map.removeLayer(endMarker);
         
@@ -244,7 +241,7 @@
         endNodeText.textContent = "None";
         statusText.textContent = "Click map to set Accident (Start).";
         findPathBtn.disabled = true;
-        resultContainer.style.display = 'none'; // Hide results
+        resultContainer.style.display = 'none'; // Hide result
     });
 
 </script>
