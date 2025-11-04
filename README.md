@@ -80,5 +80,5 @@ Both models were trained on the 1-file dataset. The results were as follows:
 
 ```bash
 git clone https://github.com/Amanraj316/PathSafe
-cd [YOUR_REPO_FOLDER_NAME]
+cd PathSafe
 ```
